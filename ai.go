@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -90,6 +91,7 @@ func (c *aiClient) ExtractBatch(ctx context.Context, imagePaths []string) (strin
 	content = append(content, contentPart{Type: "text", Text: batchPrompt(c.prompt, len(imagePaths))})
 
 	for _, p := range imagePaths {
+		log.Println("... Processing " + p)
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", p, err)

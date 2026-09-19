@@ -1,0 +1,65 @@
+jwt_secret.txt
+**/dist/**
+*.db
+mcp-server/supersoniciq-mcp-server
+**/.playwright-mcp/**
+.geniq_rag.db*
+resources/**
+conversations.json
+**/rag_documents/**
+**/node_modules/**
+**/build/**
+**/rag_chroma_db/**
+**/rag-db/**
+**/venv/**
+.agents/**
+*.pyc
+.playwright-mcp/**
+test_*
+.continue/**
+*.pad
+*.pad.think
+.env
+webnote-go
+*.log
+webnote-linux-amd64-static
+uploads/*
+*.bak
+# Binaries for programs and plugins
+*.exe
+*.*~
+*.dll
+*.so
+*.dylib
+*OTP.png
+*.tar
+*.tgz
+*.xz
+*.lzma
+*.zip
+*.crt
+*.key
+*.sqlite3
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+*.swp
+*.~
+*.zip
+*.gz
+*.bz2
+*.xz
+.vscode
+models/.*
+*.list
+
+.aider*
+geniq-mcp-server
+.geniq_rag.*

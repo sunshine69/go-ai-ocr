@@ -35,6 +35,8 @@ type config struct {
 	timeout      time.Duration
 	maxRetries   int
 	skipExisting bool
+	stateDB      string // path to the sha512 state sqlite DB ("" = default ~/.goaiocr-state.sqlite3)
+	force        bool   // reprocess files even if their hash is already in the state DB
 	imageFormat  string // "png" or "jpeg" (page renders)
 	jpegQuality  int
 	keepTemp     bool
@@ -52,10 +54,10 @@ func main() {
 func parseFlags() config {
 	var cfg config
 
-	flag.StringVar(&cfg.inputDir, "input", "", "input directory to scan for PDFs and images (required)")
-	flag.StringVar(&cfg.outputDir, "output", "", "output directory for final .md files + manifest (required)")
+	flag.StringVar(&cfg.inputDir, "i", "", "input directory to scan for PDFs and images (required)")
+	flag.StringVar(&cfg.outputDir, "o", "", "output directory for final .md files + manifest (required)")
 	flag.Float64Var(&cfg.dpi, "dpi", 450, "DPI used to rasterize PDF pages")
-	flag.StringVar(&cfg.endpoint, "endpoint", "http://127.0.0.1:8080/v1/chat/completions", "OpenAI-compatible chat completions endpoint (llama.cpp server)")
+	flag.StringVar(&cfg.endpoint, "url", "http://127.0.0.1:11434/v1/chat/completions", "OpenAI-compatible chat completions endpoint (llama.cpp server)")
 	flag.StringVar(&cfg.model, "model", "qwen2-vl", "model name to send in the request body")
 	flag.StringVar(&cfg.apiKey, "api-key", os.Getenv("go-ai-ocr_API_KEY"), "bearer token for the AI endpoint, if required")
 	flag.StringVar(&cfg.prompt, "prompt", defaultPrompt, "base instruction sent to the vision model")
@@ -63,6 +65,8 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.timeout, "timeout", 180*time.Second, "per-request timeout against the AI endpoint")
 	flag.IntVar(&cfg.maxRetries, "max-retries", 2, "retries on transient AI endpoint failures")
 	flag.BoolVar(&cfg.skipExisting, "skip-existing", true, "skip documents whose final .md already exists (resume support)")
+	flag.StringVar(&cfg.stateDB, "state-db", defaultStateDBPath(), "path to the sha512 state sqlite DB (default ~/.goaiocr-state.sqlite3)")
+	flag.BoolVar(&cfg.force, "force", false, "process files even if their hash is already in the state DB")
 	flag.StringVar(&cfg.imageFormat, "image-format", "png", "format used for rasterized PDF pages: png or jpeg")
 	flag.IntVar(&cfg.jpegQuality, "jpeg-quality", 92, "JPEG quality when -image-format=jpeg")
 	flag.BoolVar(&cfg.keepTemp, "keep-temp", false, "keep rendered page images and per-batch Markdown instead of deleting them after each document")
@@ -94,6 +98,13 @@ func run(cfg config) error {
 	if err := os.MkdirAll(cfg.outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
+	// Open the sha512 state DB (creates the file on first use). It lets a
+	// later run skip content already processed and name same-content collisions apart.
+	stateDB, err := newStateDB(cfg.stateDB)
+	if err != nil {
+		return fmt.Errorf("open state db: %w", err)
+	}
+	defer stateDB.Close()
 
 	docs, err := discoverDocuments(cfg)
 	if err != nil {
@@ -120,7 +131,42 @@ func run(cfg config) error {
 			break
 		}
 
-		outPath := doc.outputPath(cfg.outputDir)
+		// Hash the raw input bytes. A repeat run of identical content
+		// therefore hashes to the same digest, which is what lets us skip
+		// cheaply and name genuine collisions apart.
+		h, herr := fileHash512(doc.sourcePath)
+		if herr != nil {
+			log.Printf("skip %s: %v", doc.sourcePath, herr)
+			continue
+		}
+
+		// Skip content we have already processed, unless -force was set.
+		if !cfg.force {
+			already, xerr := stateDB.hashExists(h)
+			if xerr != nil {
+				log.Printf("skip %s: state db: %v", doc.sourcePath, xerr)
+				continue
+			}
+			if already {
+				skipped++
+				if cfg.verbose {
+					log.Printf("SKIP  %s (hash %s already processed)", doc.sourcePath, shortHash(h))
+				}
+				manifest.WriteSkipped(doc, "")
+				continue
+			}
+		}
+
+		// Pick the output path: <base>.md by default, but if that name is
+		// already taken by different content, append the first 7 hex chars
+		// of the hash (e.g. docab12cd.md) so same-named files never clobber
+		// each other.
+		outPath, outSuf, oerr := stateDB.resolveOutputPath(doc.sourcePath, cfg.outputDir, h)
+		if oerr != nil {
+			log.Printf("output for %s: %v", doc.sourcePath, oerr)
+			continue
+		}
+		_ = outSuf
 		if cfg.skipExisting {
 			if _, err := os.Stat(outPath); err == nil {
 				skipped++
@@ -141,6 +187,23 @@ func run(cfg config) error {
 			continue
 		}
 		done++
+		// Record this processed source in the state DB so a later run
+		// can skip content with the same hash. The upsert also updates the
+		// collision cache so forced reprocesses agree with the persisted
+		// output mapping.
+		if uerr := stateDB.upsert(&stateRecord{
+			SourcePath:  doc.sourcePath,
+			Hash:        h,
+			OutputPath:  outPath,
+			SourceType:  doc.sourceType(),
+			PageCount:   pageCount,
+			DPI:         cfg.dpi,
+			BatchSize:   cfg.batchSize,
+			Model:       cfg.model,
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		}); uerr != nil {
+			log.Printf("state db upsert for %s: %v", doc.sourcePath, uerr)
+		}
 		log.Printf("OK    %s (%d page(s)) -> %s", doc.sourcePath, pageCount, outPath)
 		manifest.WriteSuccess(doc, outPath, pageCount)
 	}

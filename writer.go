@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,9 +12,11 @@ import (
 )
 
 // writeFinalDoc reads every batch part file (in order) and concatenates
-// them into one Markdown file at outPath, with a small YAML front matter
-// block carrying provenance (source, page count, dpi, model, batch size,
-// timestamp) that a downstream RAG indexer can parse without this program.
+// them into one Markdown file at outPath. Any ```markdown fence the model
+// emits around a part is stripped (see unwrapMarkdown), and a small YAML
+// front-matter block carrying provenance (source, page count, dpi, model,
+// batch size, timestamp) is prepended, which a downstream RAG indexer can
+// parse without this program.
 func writeFinalDoc(outPath string, doc document, cfg config, pageCount int, partPaths []string) error {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -37,7 +40,15 @@ func writeFinalDoc(outPath string, doc document, cfg config, pageCount int, part
 		if err != nil {
 			return fmt.Errorf("read part %d: %w", i+1, err)
 		}
-		b.WriteString(strings.TrimSpace(string(part)))
+		// Strip any ```markdown ``` fence the model emits. The model is
+		// told (see the default prompt) to emit Markdown only, but many
+		// models wrap their reply in a ```markdown fenced block out of
+		// rendering habit, not because it's required — so this must
+		// survive code-side, not on the model's good behaviour. The final
+		// .md is fed to a downstream RAG indexer, which wants raw
+		// Markdown text with no wrapper. Unwrap each part independently
+		// so only one batch carrying a fence doesn't sink the document.
+		b.WriteString(string(unwrapMarkdown(part)))
 		b.WriteString("\n\n")
 	}
 
@@ -49,6 +60,45 @@ func writeFinalDoc(outPath string, doc document, cfg config, pageCount int, part
 		return fmt.Errorf("rename into place: %w", err)
 	}
 	return nil
+}
+
+// unwrapMarkdown strips a single leading ```markdown fence block from the
+// model's output, returning the raw Markdown it wrapped. The final .md file
+// exists to be read by a downstream RAG indexer that expects pure Markdown
+// text — a ```markdown wrapper is only a rendering aid and must not survive
+// into the stored document.
+//
+// The default prompt already asks the model to emit Markdown only, but many
+// models default to wrapping their reply in a fenced block regardless. This
+// is therefore applied defensively, independent of the model following the
+// instruction: if a fence is present we peel it; if not we return the input
+// untouched.
+func unwrapMarkdown(b []byte) []byte {
+	trimmed := bytes.TrimLeft(b, " \t\r\n")
+	// Confirm it opens with a ``` fence line (e.g. "```markdown") on its
+	// own line, allowing optional leading/whitespace and a language tag.
+	idx := bytes.IndexByte(trimmed, '\n')
+	if idx == -1 {
+		return bytes.TrimSpace(b)
+	}
+	openLine := strings.ToLower(strings.TrimSpace(string(trimmed[:idx])))
+	if !strings.HasPrefix(openLine, "```") || len(openLine) < 4 {
+		return bytes.TrimSpace(b)
+	}
+	lang := strings.ToLower(strings.TrimPrefix(openLine[3:], "markdown"))
+	// Accept the fence as a markdown fence when the tag is empty or is a
+	// well-known "markdown" qualifier (e.g. "markdown-fenced").
+	if !(lang == "" || strings.HasPrefix(lang, "-") || strings.HasPrefix(lang, "_") || strings.HasPrefix(lang, " fenced")) {
+		return bytes.TrimSpace(b)
+	}
+	// Find the closing fence; anything before it is the wrapped content.
+	content := trimmed[idx+1:]
+	closing := bytes.Index(content, []byte("```"))
+	if closing == -1 {
+		// No closing fence: leave the input alone rather than guess.
+		return bytes.TrimSpace(b)
+	}
+	return bytes.TrimSpace(content[:closing])
 }
 
 // manifestRecord is one line of manifest.jsonl: a flat, indexer-friendly
