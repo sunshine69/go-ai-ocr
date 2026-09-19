@@ -1,4 +1,4 @@
-# pdf2rag
+# go-ai-ocr
 
 Scans an input directory for PDFs and images, rasterizes PDF pages via MuPDF
 (`github.com/gen2brain/go-fitz`) at a configurable DPI (default 450), sends
@@ -11,13 +11,13 @@ directory laid out for a downstream RAG indexer to consume.
 Requires cgo + a C toolchain (go-fitz bundles MuPDF's C sources).
 
 ```
-go build -o pdf2rag .
+go build -o go-ai-ocr .
 ```
 
 ## Run
 
 ```
-./pdf2rag \
+./go-ai-ocr \
   -input  /path/to/docs \
   -output /path/to/index-ready \
   -endpoint http://127.0.0.1:8080/v1/chat/completions \
@@ -50,7 +50,7 @@ plain text an indexer can chunk directly, with provenance already attached.
 | `-dpi`           | 450                                                    | PDF rasterization DPI                     |
 | `-endpoint`      | `http://127.0.0.1:8080/v1/chat/completions`           | Vision model endpoint                     |
 | `-model`         | `qwen2-vl`                                            | Model name in request body                |
-| `-api-key`       | `$PDF2RAG_API_KEY`                                    | Bearer token, if the endpoint needs one   |
+| `-api-key`       | `$go-ai-ocr_API_KEY`                                    | Bearer token, if the endpoint needs one   |
 | `-prompt`        | built-in OCR/structuring prompt                       | Override the instruction sent per image   |
 | `-concurrency`   | `NumCPU()`                                             | Parallel page/image workers               |
 | `-timeout`       | 180s                                                    | Per-request HTTP timeout                  |

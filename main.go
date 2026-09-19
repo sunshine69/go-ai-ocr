@@ -1,4 +1,4 @@
-// Command pdf2rag scans a directory for PDFs and images, renders PDF pages
+// Command go-ai-ocr scans a directory for PDFs and images, renders PDF pages
 // to high-DPI images via MuPDF (go-fitz), sends each page/image to a
 // vision-capable model served by llama.cpp (Qwen2-VL, OpenAI-compatible
 // /v1/chat/completions), and writes the resulting structured text to an
@@ -40,7 +40,7 @@ func main() {
 	cfg := parseFlags()
 
 	if err := run(cfg); err != nil {
-		log.Fatalf("pdf2rag: %v", err)
+		log.Fatalf("go-ai-ocr: %v", err)
 	}
 }
 
@@ -52,7 +52,7 @@ func parseFlags() config {
 	flag.Float64Var(&cfg.dpi, "dpi", 450, "DPI used to rasterize PDF pages")
 	flag.StringVar(&cfg.endpoint, "endpoint", "http://127.0.0.1:8080/v1/chat/completions", "OpenAI-compatible chat completions endpoint (llama.cpp server)")
 	flag.StringVar(&cfg.model, "model", "qwen2-vl", "model name to send in the request body")
-	flag.StringVar(&cfg.apiKey, "api-key", os.Getenv("PDF2RAG_API_KEY"), "bearer token for the AI endpoint, if required")
+	flag.StringVar(&cfg.apiKey, "api-key", os.Getenv("go-ai-ocr_API_KEY"), "bearer token for the AI endpoint, if required")
 	flag.StringVar(&cfg.prompt, "prompt", defaultPrompt, "instruction sent to the vision model alongside each image")
 	flag.IntVar(&cfg.concurrency, "concurrency", runtime.NumCPU(), "number of pages/images processed concurrently")
 	flag.DurationVar(&cfg.timeout, "timeout", 180*time.Second, "per-request timeout against the AI endpoint")
@@ -64,7 +64,7 @@ func parseFlags() config {
 	flag.Parse()
 
 	if cfg.inputDir == "" || cfg.outputDir == "" {
-		fmt.Fprintln(os.Stderr, "usage: pdf2rag -input <dir> -output <dir> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: go-ai-ocr -input <dir> -output <dir> [flags]")
 		flag.PrintDefaults()
 		os.Exit(2)
 	}

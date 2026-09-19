@@ -1,4 +1,4 @@
-module pdf2rag
+module go-ai-ocr
 
 go 1.22
 

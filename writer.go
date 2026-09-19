@@ -70,7 +70,7 @@ type manifestWriter struct {
 func newManifestWriter(path string) *manifestWriter {
 	f, err := os.Create(path)
 	if err != nil {
-		log.Fatalf("pdf2rag: create manifest %s: %v", path, err)
+		log.Fatalf("go-ai-ocr: create manifest %s: %v", path, err)
 	}
 	return &manifestWriter{path: path, f: f, enc: json.NewEncoder(f)}
 }
@@ -80,7 +80,7 @@ func (m *manifestWriter) write(r manifestRecord) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.enc.Encode(r); err != nil {
-		log.Printf("pdf2rag: manifest write failed: %v", err)
+		log.Printf("go-ai-ocr: manifest write failed: %v", err)
 	}
 }
 
@@ -119,7 +119,7 @@ func (m *manifestWriter) WriteSkipped(j job, outPath string) {
 
 func (m *manifestWriter) Close() {
 	if err := m.f.Close(); err != nil {
-		log.Printf("pdf2rag: closing manifest: %v", err)
+		log.Printf("go-ai-ocr: closing manifest: %v", err)
 	}
 }
 
