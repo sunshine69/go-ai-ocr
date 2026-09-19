@@ -1,20 +1,19 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// job describes a single unit of work: one PDF page, or one standalone image.
-type job struct {
-	sourcePath string // absolute path to the original file on disk
+// document describes one source file to process: a PDF (whose pages will
+// all be rendered and folded into a single output .md) or a standalone
+// image (treated as a one-page document).
+type document struct {
+	sourcePath string // absolute path to the original file
 	relDir     string // directory of the source, relative to the input root
 	baseName   string // source file name without extension
 	isPDF      bool
-	pageNum    int // 1-based page number; 0 for standalone images
-	pageCount  int // total pages in the source PDF; 0 for standalone images
 }
 
 var imageExts = map[string]bool{
@@ -28,12 +27,12 @@ var imageExts = map[string]bool{
 	".gif":  true,
 }
 
-// discoverJobs walks the input directory. PDFs are expanded into one job per
-// page (page count is discovered lazily during rendering since opening the
-// document twice is wasteful); this pass just enumerates source files, and
-// expandPDF below turns each PDF file into its page jobs.
-func discoverJobs(cfg config) ([]job, error) {
-	var files []job
+// discoverDocuments walks the input directory and returns one entry per
+// PDF or image file found, in the order filepath.Walk visits them
+// (alphabetical within each directory). Page expansion happens later,
+// per document, during rendering.
+func discoverDocuments(cfg config) ([]document, error) {
+	var docs []document
 	root := cfg.inputDir
 
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -52,39 +51,26 @@ func discoverJobs(cfg config) ([]job, error) {
 
 		switch {
 		case ext == ".pdf":
-			pages, perr := expandPDF(path, relDir, base)
-			if perr != nil {
-				return fmt.Errorf("inspect %s: %w", path, perr)
-			}
-			files = append(files, pages...)
+			docs = append(docs, document{sourcePath: path, relDir: relDir, baseName: base, isPDF: true})
 		case imageExts[ext]:
-			files = append(files, job{
-				sourcePath: path,
-				relDir:     relDir,
-				baseName:   base,
-			})
+			docs = append(docs, document{sourcePath: path, relDir: relDir, baseName: base})
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return files, nil
+	return docs, nil
 }
 
-func (j job) describe() string {
-	if j.isPDF {
-		return fmt.Sprintf("%s (page %d/%d)", j.sourcePath, j.pageNum, j.pageCount)
-	}
-	return j.sourcePath
+// outputPath is the single, final Markdown file for this document.
+func (d document) outputPath(outputRoot string) string {
+	return filepath.Join(outputRoot, d.relDir, d.baseName+".md")
 }
 
-// outputPath returns where the extracted text for this job should be written,
-// mirroring the input directory structure under the output root.
-func (j job) outputPath(outputRoot string) string {
-	dir := filepath.Join(outputRoot, j.relDir, j.baseName)
-	if j.isPDF {
-		return filepath.Join(dir, fmt.Sprintf("%s_page_%04d.md", j.baseName, j.pageNum))
+func (d document) sourceType() string {
+	if d.isPDF {
+		return "pdf"
 	}
-	return filepath.Join(dir, j.baseName+".md")
+	return "image"
 }

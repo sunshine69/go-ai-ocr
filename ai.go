@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -66,26 +69,45 @@ type chatResponse struct {
 	} `json:"error"`
 }
 
-// Extract sends one page/image to the vision model and returns the
-// structured text it produces.
-func (c *aiClient) Extract(ctx context.Context, imgData []byte, mimeType string) (string, error) {
-	dataURI := "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(imgData)
+var extToMime = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".tif":  "image/tiff",
+	".tiff": "image/tiff",
+	".bmp":  "image/bmp",
+	".webp": "image/webp",
+	".gif":  "image/gif",
+}
+
+// ExtractBatch reads imagePaths (in order — this is the whole point of
+// batching: a handful of *consecutive* pages given to the model together
+// in one request) and asks the model for one Markdown response covering
+// all of them. There is no concurrency here: this is one blocking HTTP
+// call, retried in place on failure.
+func (c *aiClient) ExtractBatch(ctx context.Context, imagePaths []string) (string, error) {
+	content := make([]contentPart, 0, len(imagePaths)+1)
+	content = append(content, contentPart{Type: "text", Text: batchPrompt(c.prompt, len(imagePaths))})
+
+	for _, p := range imagePaths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", p, err)
+		}
+		mimeType := extToMime[strings.ToLower(filepath.Ext(p))]
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		dataURI := "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+		content = append(content, contentPart{Type: "image_url", ImageURL: &imageURL{URL: dataURI}})
+	}
 
 	reqBody := chatRequest{
 		Model:       c.model,
 		Temperature: 0,
 		MaxTokens:   4096,
-		Messages: []chatMessage{
-			{
-				Role: "user",
-				Content: []contentPart{
-					{Type: "text", Text: c.prompt},
-					{Type: "image_url", ImageURL: &imageURL{URL: dataURI}},
-				},
-			},
-		},
+		Messages:    []chatMessage{{Role: "user", Content: content}},
 	}
-
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
@@ -100,7 +122,6 @@ func (c *aiClient) Extract(ctx context.Context, imgData []byte, mimeType string)
 				return "", ctx.Err()
 			}
 		}
-
 		text, err := c.doRequest(ctx, payload)
 		if err == nil {
 			return text, nil
@@ -108,6 +129,19 @@ func (c *aiClient) Extract(ctx context.Context, imgData []byte, mimeType string)
 		lastErr = err
 	}
 	return "", fmt.Errorf("after %d attempt(s): %w", c.maxRetries+1, lastErr)
+}
+
+// batchPrompt appends a short instruction covering how to lay out the
+// response when more than one page image is attached, so a batch's output
+// stays splittable/readable in the final concatenated document.
+func batchPrompt(base string, nImages int) string {
+	if nImages <= 1 {
+		return base
+	}
+	return base + fmt.Sprintf("\n\nYou are given %d sequential page images from the same document, "+
+		"in reading order. Produce output for all of them in one response. Before each page's content, "+
+		"insert a line by itself: `<!-- page N -->` where N is that page's position in this batch (starting at 1). "+
+		"Never merge two pages' content together without that marker between them.", nImages)
 }
 
 func (c *aiClient) doRequest(ctx context.Context, payload []byte) (string, error) {

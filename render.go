@@ -6,16 +6,18 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"os"
+	"path/filepath"
 
 	fitz "github.com/gen2brain/go-fitz"
 )
 
-// expandPDF opens path just long enough to read its page count, then returns
-// one job per page. The document is not kept open: rendering happens later,
-// on demand, per page (see renderPage), so concurrent workers never share a
-// single go-fitz Document, which is not safe for concurrent use.
-func expandPDF(path, relDir, base string) ([]job, error) {
-	doc, err := fitz.New(path)
+// renderPDFPages opens path, rasterizes every page at cfg.dpi, and writes
+// each page to its own image file inside tempDir. It returns the page
+// image paths in page order. Everything happens in this one call, on the
+// caller's goroutine — there is no concurrency here.
+func renderPDFPages(cfg config, srcPath, tempDir string) ([]string, error) {
+	doc, err := fitz.New(srcPath)
 	if err != nil {
 		return nil, fmt.Errorf("open pdf: %w", err)
 	}
@@ -26,36 +28,28 @@ func expandPDF(path, relDir, base string) ([]job, error) {
 		return nil, fmt.Errorf("pdf has no pages")
 	}
 
-	jobs := make([]job, 0, n)
-	for p := 1; p <= n; p++ {
-		jobs = append(jobs, job{
-			sourcePath: path,
-			relDir:     relDir,
-			baseName:   base,
-			isPDF:      true,
-			pageNum:    p,
-			pageCount:  n,
-		})
-	}
-	return jobs, nil
-}
-
-// renderPage rasterizes a single PDF page to an encoded image (PNG or JPEG)
-// at cfg.dpi. It opens and closes its own Document handle so it is safe to
-// call from multiple goroutines concurrently.
-func renderPage(cfg config, j job) (data []byte, mimeType string, err error) {
-	doc, err := fitz.New(j.sourcePath)
-	if err != nil {
-		return nil, "", fmt.Errorf("open pdf: %w", err)
-	}
-	defer doc.Close()
-
-	img, err := doc.ImageDPI(j.pageNum-1, cfg.dpi)
-	if err != nil {
-		return nil, "", fmt.Errorf("rasterize page %d at %.0f dpi: %w", j.pageNum, cfg.dpi, err)
+	ext := ".png"
+	if cfg.imageFormat == "jpeg" || cfg.imageFormat == "jpg" {
+		ext = ".jpg"
 	}
 
-	return encodeImage(img, cfg)
+	pagePaths := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		img, err := doc.ImageDPI(i, cfg.dpi)
+		if err != nil {
+			return nil, fmt.Errorf("rasterize page %d at %.0f dpi: %w", i+1, cfg.dpi, err)
+		}
+		data, _, err := encodeImage(img, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("encode page %d: %w", i+1, err)
+		}
+		p := filepath.Join(tempDir, fmt.Sprintf("page_%04d%s", i+1, ext))
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			return nil, fmt.Errorf("write page %d: %w", i+1, err)
+		}
+		pagePaths = append(pagePaths, p)
+	}
+	return pagePaths, nil
 }
 
 func encodeImage(img image.Image, cfg config) (data []byte, mimeType string, err error) {

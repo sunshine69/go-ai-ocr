@@ -1,8 +1,14 @@
 // Command go-ai-ocr scans a directory for PDFs and images, renders PDF pages
-// to high-DPI images via MuPDF (go-fitz), sends each page/image to a
-// vision-capable model served by llama.cpp (Qwen2-VL, OpenAI-compatible
-// /v1/chat/completions), and writes the resulting structured text to an
-// output directory in a layout a RAG indexer can consume directly.
+// to temporary page images via MuPDF (go-fitz), submits them to a
+// vision-capable model served OpenAI-style (e.g. llama.cpp running
+// Qwen2-VL) in small fixed-size batches, and writes one concatenated
+// Markdown file per source document to an output directory ready for a
+// downstream RAG indexer.
+//
+// This is intentionally single-threaded end to end: one document at a
+// time, one batch at a time, one AI request at a time. There is no worker
+// pool and no concurrency to tune — the batch size is the only knob that
+// controls how much you ask the model to look at in one request.
 package main
 
 import (
@@ -13,8 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -27,12 +31,13 @@ type config struct {
 	model        string
 	apiKey       string
 	prompt       string
-	concurrency  int
+	batchSize    int
 	timeout      time.Duration
 	maxRetries   int
 	skipExisting bool
 	imageFormat  string // "png" or "jpeg" (page renders)
 	jpegQuality  int
+	keepTemp     bool
 	verbose      bool
 }
 
@@ -48,18 +53,19 @@ func parseFlags() config {
 	var cfg config
 
 	flag.StringVar(&cfg.inputDir, "input", "", "input directory to scan for PDFs and images (required)")
-	flag.StringVar(&cfg.outputDir, "output", "", "output directory for extracted text + manifest (required)")
+	flag.StringVar(&cfg.outputDir, "output", "", "output directory for final .md files + manifest (required)")
 	flag.Float64Var(&cfg.dpi, "dpi", 450, "DPI used to rasterize PDF pages")
 	flag.StringVar(&cfg.endpoint, "endpoint", "http://127.0.0.1:8080/v1/chat/completions", "OpenAI-compatible chat completions endpoint (llama.cpp server)")
 	flag.StringVar(&cfg.model, "model", "qwen2-vl", "model name to send in the request body")
 	flag.StringVar(&cfg.apiKey, "api-key", os.Getenv("go-ai-ocr_API_KEY"), "bearer token for the AI endpoint, if required")
-	flag.StringVar(&cfg.prompt, "prompt", defaultPrompt, "instruction sent to the vision model alongside each image")
-	flag.IntVar(&cfg.concurrency, "concurrency", runtime.NumCPU(), "number of pages/images processed concurrently")
+	flag.StringVar(&cfg.prompt, "prompt", defaultPrompt, "base instruction sent to the vision model")
+	flag.IntVar(&cfg.batchSize, "batch-size", 2, "number of consecutive page images sent to the model per request")
 	flag.DurationVar(&cfg.timeout, "timeout", 180*time.Second, "per-request timeout against the AI endpoint")
 	flag.IntVar(&cfg.maxRetries, "max-retries", 2, "retries on transient AI endpoint failures")
-	flag.BoolVar(&cfg.skipExisting, "skip-existing", true, "skip pages whose output file already exists (resume support)")
+	flag.BoolVar(&cfg.skipExisting, "skip-existing", true, "skip documents whose final .md already exists (resume support)")
 	flag.StringVar(&cfg.imageFormat, "image-format", "png", "format used for rasterized PDF pages: png or jpeg")
 	flag.IntVar(&cfg.jpegQuality, "jpeg-quality", 92, "JPEG quality when -image-format=jpeg")
+	flag.BoolVar(&cfg.keepTemp, "keep-temp", false, "keep rendered page images and per-batch Markdown instead of deleting them after each document")
 	flag.BoolVar(&cfg.verbose, "v", false, "verbose logging")
 	flag.Parse()
 
@@ -68,10 +74,13 @@ func parseFlags() config {
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
+	if cfg.batchSize < 1 {
+		cfg.batchSize = 1
+	}
 	return cfg
 }
 
-const defaultPrompt = `You are an OCR and document-structuring engine. Read the attached page image ` +
+const defaultPrompt = `You are an OCR and document-structuring engine. Read the attached page image(s) ` +
 	`carefully and output clean, structured text suitable for a retrieval-augmented-generation ` +
 	`(RAG) index. Rules:
 - Transcribe all readable text faithfully, preserving reading order.
@@ -86,15 +95,15 @@ func run(cfg config) error {
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
-	jobs, err := discoverJobs(cfg)
+	docs, err := discoverDocuments(cfg)
 	if err != nil {
 		return fmt.Errorf("discover input: %w", err)
 	}
-	if len(jobs) == 0 {
+	if len(docs) == 0 {
 		log.Println("no PDF or image files found under", cfg.inputDir)
 		return nil
 	}
-	log.Printf("discovered %d page(s)/image(s) to process", len(jobs))
+	log.Printf("discovered %d document(s) to process (batch-size=%d)", len(docs), cfg.batchSize)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -103,74 +112,42 @@ func run(cfg config) error {
 	manifest := newManifestWriter(filepath.Join(cfg.outputDir, "manifest.jsonl"))
 	defer manifest.Close()
 
-	sem := make(chan struct{}, max(1, cfg.concurrency))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var failed, done, skipped int
+	var done, failed, skipped int
 
-	for _, j := range jobs {
-		j := j
-		outPath := j.outputPath(cfg.outputDir)
+	for _, doc := range docs {
+		if ctx.Err() != nil {
+			log.Println("interrupted, stopping before", doc.sourcePath)
+			break
+		}
 
+		outPath := doc.outputPath(cfg.outputDir)
 		if cfg.skipExisting {
 			if _, err := os.Stat(outPath); err == nil {
-				mu.Lock()
 				skipped++
-				mu.Unlock()
-				manifest.WriteSkipped(j, outPath)
+				if cfg.verbose {
+					log.Printf("SKIP  %s (already have %s)", doc.sourcePath, outPath)
+				}
+				manifest.WriteSkipped(doc, outPath)
 				continue
 			}
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
-
-			if ctx.Err() != nil {
-				return
-			}
-
-			text, procErr := processJob(ctx, client, cfg, j)
-			mu.Lock()
-			defer mu.Unlock()
-			if procErr != nil {
-				failed++
-				log.Printf("FAIL  %s: %v", j.describe(), procErr)
-				manifest.WriteFailure(j, procErr)
-				return
-			}
-			if err := writeOutput(outPath, j, cfg, text); err != nil {
-				failed++
-				log.Printf("FAIL  %s: write output: %v", j.describe(), err)
-				manifest.WriteFailure(j, err)
-				return
-			}
-			done++
-			if cfg.verbose {
-				log.Printf("OK    %s -> %s", j.describe(), outPath)
-			}
-			manifest.WriteSuccess(j, outPath)
-		}()
+		log.Printf("processing %s", doc.sourcePath)
+		pageCount, err := processDocument(ctx, client, cfg, doc, outPath)
+		if err != nil {
+			failed++
+			log.Printf("FAIL  %s: %v", doc.sourcePath, err)
+			manifest.WriteFailure(doc, err)
+			continue
+		}
+		done++
+		log.Printf("OK    %s (%d page(s)) -> %s", doc.sourcePath, pageCount, outPath)
+		manifest.WriteSuccess(doc, outPath, pageCount)
 	}
-
-	wg.Wait()
 
 	log.Printf("done: %d succeeded, %d failed, %d skipped (output: %s)", done, failed, skipped, cfg.outputDir)
 	if failed > 0 {
-		return fmt.Errorf("%d job(s) failed, see log above and %s", failed, manifest.path)
+		return fmt.Errorf("%d document(s) failed, see log above and %s", failed, manifest.path)
 	}
 	return nil
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
