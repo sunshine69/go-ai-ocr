@@ -134,38 +134,51 @@ func run(cfg config) error {
 		// Hash the raw input bytes. A repeat run of identical content
 		// therefore hashes to the same digest, which is what lets us skip
 		// cheaply and name genuine collisions apart.
+		// Hash the raw input bytes. A repeat run of identical content
+		// therefore hashes to the same digest, which is what lets us skip
+		// cheaply and name genuine collisions apart.
 		h, herr := fileHash512(doc.sourcePath)
 		if herr != nil {
 			log.Printf("skip %s: %v", doc.sourcePath, herr)
 			continue
 		}
 
-		// Skip content we have already processed, unless -force was set.
+		// Pick the output path first to check for existence.
+		outPath, outSuf, oerr := stateDB.resolveOutputPath(doc.sourcePath, cfg.outputDir, h)
+		if oerr != nil {
+			log.Printf("output for %s: %v", doc.sourcePath, oerr)
+			continue
+		}
+
+		// Skip content we have already processed, unless -force was set or the output file is missing.
 		if !cfg.force {
 			already, xerr := stateDB.hashExists(h)
 			if xerr != nil {
 				log.Printf("skip %s: state db: %v", doc.sourcePath, xerr)
 				continue
 			}
+
 			if already {
-				skipped++
-				if cfg.verbose {
-					log.Printf("SKIP  %s (hash %s already processed)", doc.sourcePath, shortHash(h))
+				// If the file exists on disk, we can safely skip it. 
+				// If it's missing, we reprocess to ensure consistency between DB and FS.
+				exists := true
+				if _, err := os.Stat(outPath); err != nil {
+					exists = false
 				}
-				manifest.WriteSkipped(doc, "")
-				continue
+
+				if exists {
+					skipped++
+					if cfg.verbose {
+						log.Printf("SKIP  %s (hash %s already processed and output exists)", doc.sourcePath, shortHash(h))
+					}
+					manifest.WriteSkipped(doc, "")
+					continue
+				} else if cfg.verbose {
+					log.Printf("REPROCESS  %s (hash %s in DB but output missing: %s)", doc.sourcePath, shortHash(h), outPath)
+				}
 			}
 		}
 
-		// Pick the output path: <base>.md by default, but if that name is
-		// already taken by different content, append the first 7 hex chars
-		// of the hash (e.g. docab12cd.md) so same-named files never clobber
-		// each other.
-		outPath, outSuf, oerr := stateDB.resolveOutputPath(doc.sourcePath, cfg.outputDir, h)
-		if oerr != nil {
-			log.Printf("output for %s: %v", doc.sourcePath, oerr)
-			continue
-		}
 		_ = outSuf
 		if cfg.skipExisting {
 			if _, err := os.Stat(outPath); err == nil {
@@ -178,6 +191,7 @@ func run(cfg config) error {
 			}
 		}
 
+		log.Printf("processing %s", doc.sourcePath)
 		log.Printf("processing %s", doc.sourcePath)
 		pageCount, err := processDocument(ctx, client, cfg, doc, outPath)
 		if err != nil {

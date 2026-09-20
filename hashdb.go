@@ -185,12 +185,12 @@ func (db *StateDB) rememberOutput(outputPath, hash string) {
 
 func (db *StateDB) resolveOutputPath(source, outputPath, sourceHash string) (path, suffix string, err error) {
 	base := strings.TrimSuffix(filepath.Base(source), filepath.Ext(source))
-	plain := filepath.Join(filepath.Dir(outputPath), base+".md")
+	plain := filepath.Join(outputPath, base+".md")
 
 	if _, statErr := os.Stat(plain); statErr != nil {
 		return plain, "", nil
 	}
-	suffixed := base + sourceHash[:7] + ".md"
+	suffixed := filepath.Join(outputPath, base+sourceHash[:7]+".md")
 	return suffixed, sourceHash[:7], nil
 }
 
