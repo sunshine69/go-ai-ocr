@@ -35,7 +35,7 @@ type config struct {
 	timeout      time.Duration
 	maxRetries   int
 	skipExisting bool
-	stateDB      string // path to the sha512 state sqlite DB ("" = default ~/.goaiocr-state.sqlite3)
+	stateDB      string // path to the sha512 state sqlite DB ("" = default ~/goaiocr-state.sqlite3)
 	force        bool   // reprocess files even if their hash is already in the state DB
 	imageFormat  string // "png" or "jpeg" (page renders)
 	jpegQuality  int
@@ -65,7 +65,7 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.timeout, "timeout", 180*time.Second, "per-request timeout against the AI endpoint")
 	flag.IntVar(&cfg.maxRetries, "max-retries", 2, "retries on transient AI endpoint failures")
 	flag.BoolVar(&cfg.skipExisting, "skip-existing", true, "skip documents whose final .md already exists (resume support)")
-	flag.StringVar(&cfg.stateDB, "state-db", defaultStateDBPath(), "path to the sha512 state sqlite DB (default ~/.goaiocr-state.sqlite3)")
+	flag.StringVar(&cfg.stateDB, "state-db", defaultStateDBPath(), "path to the sha512 state sqlite DB (default ~/goaiocr-state.sqlite3)")
 	flag.BoolVar(&cfg.force, "force", false, "process files even if their hash is already in the state DB")
 	flag.StringVar(&cfg.imageFormat, "image-format", "png", "format used for rasterized PDF pages: png or jpeg")
 	flag.IntVar(&cfg.jpegQuality, "jpeg-quality", 92, "JPEG quality when -image-format=jpeg")
@@ -131,55 +131,60 @@ func run(cfg config) error {
 			break
 		}
 
-		// Hash the raw input bytes. A repeat run of identical content
-		// therefore hashes to the same digest, which is what lets us skip
-		// cheaply and name genuine collisions apart.
-		// Hash the raw input bytes. A repeat run of identical content
-		// therefore hashes to the same digest, which is what lets us skip
-		// cheaply and name genuine collisions apart.
+		// Hash the raw input bytes first. A repeat run of identical
+		// content therefore hashes to the same digest, which is what lets
+		// us skip cheaply and name genuine collisions apart.
 		h, herr := fileHash512(doc.sourcePath)
 		if herr != nil {
 			log.Printf("skip %s: %v", doc.sourcePath, herr)
 			continue
 		}
 
-		// Pick the output path first to check for existence.
-		outPath, outSuf, oerr := stateDB.resolveOutputPath(doc.sourcePath, cfg.outputDir, h)
-		if oerr != nil {
-			log.Printf("output for %s: %v", doc.sourcePath, oerr)
-			continue
-		}
-
-		// Skip content we have already processed, unless -force was set or the output file is missing.
+		// Skip a repeat of content we have already processed, unless
+		// -force was set. When we DID process it, the state DB recorded
+		// the exact output path it produced; we use that recorded path
+		// to decide whether the result is still on disk. If the file is
+		// missing we reprocess to keep the DB and filesystem consistent.
 		if !cfg.force {
 			already, xerr := stateDB.hashExists(h)
 			if xerr != nil {
 				log.Printf("skip %s: state db: %v", doc.sourcePath, xerr)
 				continue
 			}
-
 			if already {
-				// If the file exists on disk, we can safely skip it. 
-				// If it's missing, we reprocess to ensure consistency between DB and FS.
-				exists := true
-				if _, err := os.Stat(outPath); err != nil {
-					exists = false
-				}
-
-				if exists {
-					skipped++
-					if cfg.verbose {
-						log.Printf("SKIP  %s (hash %s already processed and output exists)", doc.sourcePath, shortHash(h))
-					}
-					manifest.WriteSkipped(doc, "")
+				outPath, oerr := stateDB.outputPathFor(h)
+				if oerr != nil {
+					log.Printf("skip %s: state db: %v", doc.sourcePath, oerr)
 					continue
+				}
+				if outPath != "" {
+					if _, statErr := os.Stat(outPath); statErr == nil {
+						skipped++
+						if cfg.verbose {
+							log.Printf("SKIP  %s (hash %s already processed)", doc.sourcePath, shortHash(h))
+						}
+						manifest.WriteSkipped(doc, outPath)
+						continue
+					} else if cfg.verbose {
+						log.Printf("REPROCESS  %s (hash %s in DB, output %s missing)", doc.sourcePath, shortHash(h), outPath)
+					}
 				} else if cfg.verbose {
-					log.Printf("REPROCESS  %s (hash %s in DB but output missing: %s)", doc.sourcePath, shortHash(h), outPath)
+					log.Printf("REPROCESS  %s (hash %s in DB, no output recorded)", doc.sourcePath, shortHash(h))
 				}
 			}
 		}
 
-		_ = outSuf
+		// New content (or -force): resolve the output path, colliding
+		// same-named-but-different-content outputs via a hash suffix.
+		outPath, _, oerr := stateDB.resolveOutputPath(doc.sourcePath, cfg.outputDir, h)
+		if oerr != nil {
+			log.Printf("output for %s: %v", doc.sourcePath, oerr)
+			continue
+		}
+		if cfg.verbose {
+			log.Printf("[DEBUG] outPath=%s", outPath)
+		}
+
 		if cfg.skipExisting {
 			if _, err := os.Stat(outPath); err == nil {
 				skipped++
@@ -192,7 +197,6 @@ func run(cfg config) error {
 		}
 
 		log.Printf("processing %s", doc.sourcePath)
-		log.Printf("processing %s", doc.sourcePath)
 		pageCount, err := processDocument(ctx, client, cfg, doc, outPath)
 		if err != nil {
 			failed++
@@ -202,9 +206,9 @@ func run(cfg config) error {
 		}
 		done++
 		// Record this processed source in the state DB so a later run
-		// can skip content with the same hash. The upsert also updates the
-		// collision cache so forced reprocesses agree with the persisted
-		// output mapping.
+		// can skip content with the same hash. The output path stored
+		// here is the same one used above, so outputPathFor() later
+		// tests the correct on-disk file.
 		if uerr := stateDB.upsert(&stateRecord{
 			SourcePath:  doc.sourcePath,
 			Hash:        h,
@@ -221,7 +225,6 @@ func run(cfg config) error {
 		log.Printf("OK    %s (%d page(s)) -> %s", doc.sourcePath, pageCount, outPath)
 		manifest.WriteSuccess(doc, outPath, pageCount)
 	}
-
 	log.Printf("done: %d succeeded, %d failed, %d skipped (output: %s)", done, failed, skipped, cfg.outputDir)
 	if failed > 0 {
 		return fmt.Errorf("%d document(s) failed, see log above and %s", failed, manifest.path)

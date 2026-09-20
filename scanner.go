@@ -63,22 +63,6 @@ func discoverDocuments(cfg config) ([]document, error) {
 	return docs, nil
 }
 
-// outputPath is the single, final Markdown file for this document.
-func (d document) outputPath(outputRoot string) string {
-	return filepath.Join(outputRoot, d.relDir, d.baseName+".md")
-}
-// resolvedOutputPath returns the baseName-based output path, but if
-// collisionName is non-empty it is appended (a 7-char prefix of the
-// file's hash) between the name and the .md extension so two same-named
-// inputs that hash differently never clobber each other's output.
-func (d document) resolvedOutputPath(outputRoot, collisionName string) string {
-	name := d.baseName
-	if collisionName != "" {
-		name = d.baseName + collisionName
-	}
-	return filepath.Join(outputRoot, d.relDir, name+".md")
-}
-
 func (d document) sourceType() string {
 	if d.isPDF {
 		return "pdf"

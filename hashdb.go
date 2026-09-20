@@ -62,15 +62,14 @@ CREATE INDEX IF NOT EXISTS idx_processed_files_output
 // outputs that now hold different content.
 type StateDB struct {
 	db *sql.DB
-	// collisionCache mirrors the hashes that have produced each output
-	// filename. It is kept in sync with the ledger (and upsert below) so a
-	// forced reprocess of the current file does not flag itself as a
-	// name-collision.
-	collisionCache map[string]map[string]bool
-	path           string
+	// outputHashes mirrors, by output filename (basename, e.g. "doc.md"),
+	// the set of distinct hashes that have ever produced it. It is kept in
+	// sync with the ledger (and upsert below) so a forced reprocess of the
+	// current file does not falsely flag itself as a name-collision.
+	outputHashes map[string]map[string]bool
+	path         string
 }
 
-// newStateDB opens (creating if needed) the SQLite ledger at path and
 // newStateDB opens (creating if needed) the SQLite ledger at path and
 // ensures the schema exists.
 func newStateDB(path string) (*StateDB, error) {
@@ -95,16 +94,16 @@ func newStateDB(path string) (*StateDB, error) {
 		return nil, fmt.Errorf("init state db: %w", err)
 	}
 	sd := &StateDB{db: db, path: path}
-	cached, cerr := sd.collisionNameHashes()
+	cached, cerr := sd.loadOutputNames()
 	if cerr != nil {
 		db.Close()
-		return nil, fmt.Errorf("load collision cache: %w", cerr)
+		return nil, fmt.Errorf("load output hashes: %w", cerr)
 	}
-	sd.collisionCache = cached
+	sd.outputHashes = cached
 	return sd, nil
 }
 
-// ensures the schema exists.
+// Close releases the underlying connection.
 func (db *StateDB) Close() {
 	if db != nil {
 		if err := db.db.Close(); err != nil {
@@ -125,6 +124,24 @@ func (db *StateDB) hashExists(hash string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// outputPathFor returns the output markdown path that was recorded for the
+// given sha512 digest, or "" if the digest has never been processed. The
+// stored path is absolute (the program records
+// resolveOutputPath(doc.sourcePath, cfg.outputDir, h) with an absolute
+// outputDir), so a later run can test it on disk directly without guessing
+// about collisions.
+func (db *StateDB) outputPathFor(hash string) (string, error) {
+	var outPath string
+	err := db.db.QueryRow(`SELECT output_path FROM processed_files WHERE hash = ?`, hash).Scan(&outPath)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return outPath, nil
 }
 
 // upsert records (or refreshes the output mapping for) a processed source.
@@ -156,42 +173,48 @@ func (db *StateDB) upsert(rec *stateRecord) error {
 	}
 	// Keep the in-memory collision cache consistent with the write so a
 	// forced reprocess of the current file does not flag itself.
-	db.rememberOutput(rec.OutputPath, rec.Hash)
+	db.recordOutput(rec.OutputPath, rec.Hash)
 	return nil
 }
 
-// rememberOutput records (in the in-memory cache) that hash has ever been
-// produced at outputPath, so resolveOutputPath agrees with the persisted
-// ledger.
-func (db *StateDB) rememberOutput(outputPath, hash string) {
+// recordOutput records (in the in-memory cache) that hash has been produced
+// at outputPath, so resolveOutputPath agrees with the persisted ledger.
+func (db *StateDB) recordOutput(outputPath, hash string) {
 	if outputPath == "" || hash == "" {
 		return
 	}
-	if db.collisionCache == nil {
-		db.collisionCache = make(map[string]map[string]bool)
+	if db.outputHashes == nil {
+		db.outputHashes = make(map[string]map[string]bool)
 	}
 	name := filepath.Base(outputPath)
-	if db.collisionCache[name] == nil {
-		db.collisionCache[name] = make(map[string]bool)
+	if db.outputHashes[name] == nil {
+		db.outputHashes[name] = make(map[string]bool)
 	}
-	db.collisionCache[name][hash] = true
+	db.outputHashes[name][hash] = true
 }
 
 // resolveOutputPath returns the output markdown path for source, whose
 // content hashes to sourceHash. It defaults to <base>.md (derived from the
-// source's file name) and, if that path already exists on disk, falls back
-// to <base>_<first 7 hex chars of hash>.md so two same-named but
-// different-content outputs never clobber each other.
-
-func (db *StateDB) resolveOutputPath(source, outputPath, sourceHash string) (path, suffix string, err error) {
+// source's file name) and, if that name is already taken by different
+// content, falls back to <base>_<first 7 hex chars of hash>.md so two
+// same-named but different-content outputs never clobber each other.
+//
+// Collision keys are matched against recordOutput, which also keys by the
+// output basename, so both agree on run-over-run consistency.
+func (db *StateDB) resolveOutputPath(source, outputRoot, sourceHash string) (path, suffix string, err error) {
 	base := strings.TrimSuffix(filepath.Base(source), filepath.Ext(source))
-	plain := filepath.Join(outputPath, base+".md")
+	name := base + ".md"
+	plain := filepath.Join(outputRoot, name)
 
-	if _, statErr := os.Stat(plain); statErr != nil {
-		return plain, "", nil
+	// If a DIFFERENT hash already produced this basename, collide with a
+	// hash suffix so the two never clobber each other.
+	if hashSet, ok := db.outputHashes[name]; ok {
+		if _, isSame := hashSet[sourceHash]; !isSame {
+			suffix = sourceHash[:7]
+			return filepath.Join(outputRoot, base+sourceHash[:7]+".md"), suffix, nil
+		}
 	}
-	suffixed := filepath.Join(outputPath, base+sourceHash[:7]+".md")
-	return suffixed, sourceHash[:7], nil
+	return plain, "", nil
 }
 
 // outputNameHashes returns a map from output filename (e.g. "notes.md")
@@ -220,21 +243,21 @@ func (db *StateDB) outputNameHashes() (map[string]map[string]bool, error) {
 	return byName, rows.Err()
 }
 
-// collisionNameHashes loads the persisted output->hash map into the in-memory
+// loadOutputNames loads the persisted output->hash map into the in-memory
 // collision cache so resolveOutputPath stays consistent with the ledger
 // across runs.
-func (db *StateDB) collisionNameHashes() (map[string]map[string]bool, error) {
+func (db *StateDB) loadOutputNames() (map[string]map[string]bool, error) {
 	byName, err := db.outputNameHashes()
 	if err != nil {
 		return nil, err
 	}
-	if db.collisionCache == nil {
-		db.collisionCache = make(map[string]map[string]bool)
+	if db.outputHashes == nil {
+		db.outputHashes = make(map[string]map[string]bool)
 	}
 	for name, hashes := range byName {
-		db.collisionCache[name] = hashes
+		db.outputHashes[name] = hashes
 	}
-	return db.collisionCache, nil
+	return db.outputHashes, nil
 }
 
 // fileHash512 returns the lowercase hex sha512 digest of the file at path.
@@ -258,9 +281,9 @@ func fileHash512(path string) (string, error) {
 func defaultStateDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return ".goaiocr-state.sqlite3"
+		return "goaiocr-state.sqlite3"
 	}
-	return filepath.Join(home, ".goaiocr-state.sqlite3")
+	return filepath.Join(home, "goaiocr-state.sqlite3")
 }
 
 // shortHash returns a compact, human-friendly rendering of a (long) hex
