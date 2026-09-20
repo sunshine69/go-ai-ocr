@@ -62,7 +62,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.apiKey, "api-key", os.Getenv("go-ai-ocr_API_KEY"), "bearer token for the AI endpoint, if required")
 	flag.StringVar(&cfg.prompt, "prompt", defaultPrompt, "base instruction sent to the vision model")
 	flag.IntVar(&cfg.batchSize, "batch-size", 2, "number of consecutive page images sent to the model per request")
-	flag.DurationVar(&cfg.timeout, "timeout", 180*time.Second, "per-request timeout against the AI endpoint")
+	flag.DurationVar(&cfg.timeout, "timeout", 900*time.Second, "per-request timeout against the AI endpoint")
 	flag.IntVar(&cfg.maxRetries, "max-retries", 2, "retries on transient AI endpoint failures")
 	flag.BoolVar(&cfg.skipExisting, "skip-existing", true, "skip documents whose final .md already exists (resume support)")
 	flag.StringVar(&cfg.stateDB, "state-db", defaultStateDBPath(), "path to the sha512 state sqlite DB (default ~/goaiocr-state.sqlite3)")
