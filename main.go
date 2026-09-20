@@ -176,7 +176,7 @@ func run(cfg config) error {
 
 		// New content (or -force): resolve the output path, colliding
 		// same-named-but-different-content outputs via a hash suffix.
-		outPath, _, oerr := stateDB.resolveOutputPath(doc.sourcePath, cfg.outputDir, h)
+		outPath, _, oerr := stateDB.resolveOutputPath(doc.sourcePath, cfg.outputDir, h, doc.relDir)
 		if oerr != nil {
 			log.Printf("output for %s: %v", doc.sourcePath, oerr)
 			continue

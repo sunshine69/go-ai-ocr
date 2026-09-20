@@ -38,7 +38,7 @@ func TestStateDBHashSkipAndCollision(t *testing.T) {
 
 	outDir := dir
 	// Content A: plain doc.md does not exist yet, so A takes it.
-	out1, suf1, err := db.resolveOutputPath("/in/doc.pdf", outDir, hA)
+	out1, suf1, err := db.resolveOutputPath("/in/doc.pdf", outDir, hA, "")
 	if err != nil {
 		t.Fatalf("resolveOutputPath(A): %v", err)
 	}
@@ -54,7 +54,7 @@ func TestStateDBHashSkipAndCollision(t *testing.T) {
 	}
 
 	// Content B: same name doc.md now exists on disk -> must be renamed.
-	out2, suf2, err := db.resolveOutputPath("/in/doc.pdf", outDir, hB)
+	out2, suf2, err := db.resolveOutputPath("/in/doc.pdf", outDir, hB, "")
 	if err != nil {
 		t.Fatalf("resolveOutputPath(B): %v", err)
 	}
@@ -115,7 +115,7 @@ func skipDecision(db *StateDB, sourcePath, outRoot string, h string, force, skip
 			}
 		}
 	}
-	outPath, _, oerr := db.resolveOutputPath(sourcePath, outRoot, h)
+	outPath, _, oerr := db.resolveOutputPath(sourcePath, outRoot, h, "")
 	if oerr != nil {
 		return true
 	}
@@ -145,7 +145,7 @@ func TestStateDBSkipWorkflow(t *testing.T) {
 	}
 
 	// Simulate processing: resolve output, write it, record in DB.
-	out1, _, err := db.resolveOutputPath(src, outRoot, hA)
+	out1, _, err := db.resolveOutputPath(src, outRoot, hA, "")
 	if err != nil {
 		t.Fatalf("resolveOutputPath: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestStateDBTwoSameNameDifferentContent(t *testing.T) {
 
 	// A: no state yet -> plain doc.md. Persist to disk, then upsert so the
 	// in-memory outputHashes cache records A before B resolves.
-	outA, _, err := db.resolveOutputPath(srcA, outRoot, hA)
+	outA, _, err := db.resolveOutputPath(srcA, outRoot, hA, "")
 	if err != nil {
 		t.Fatalf("resolveOutputPath(A): %v", err)
 	}
@@ -219,7 +219,7 @@ func TestStateDBTwoSameNameDifferentContent(t *testing.T) {
 
 	// B: resolve now. A's upsert recorded doc.md -> hA, so B collides and
 	// must get a hash-suffixed name instead of clobbering A's output.
-	outB, _, err := db.resolveOutputPath(srcB, outRoot, hB)
+	outB, _, err := db.resolveOutputPath(srcB, outRoot, hB, "")
 	if err != nil {
 		t.Fatalf("resolveOutputPath(B): %v", err)
 	}
@@ -248,4 +248,90 @@ func TestStateDBTwoSameNameDifferentContent(t *testing.T) {
 		t.Fatalf("outputPathFor(B) = %q, %v; want %q", backB, err, outB)
 	}
 	t.Logf("A -> %s, B -> %s", filepath.Base(outA), filepath.Base(outB))
+}
+
+// TestResolveOutputPathPreservesDir verifies that the source's relative
+// directory structure is preserved in the output path. Input root
+// "/mnt/doc/Colyton-125Torquay", file "2023/Invoice INV-3556.pdf" with
+// relDir "2023", output root "resource/parsed" ->
+// resource/parsed/2023/Invoice INV-3556.md.
+//
+// It also checks the two fall-back cases:
+//   - relDir "" (single full file path, no sub-structure) -> outputRoot/base.md
+//   - relDir "." (single full file path, no sub-structure) -> outputRoot/base.md
+//
+// And that a nested collision still gets a hash suffix.
+func TestResolveOutputPathPreservesDir(t *testing.T) {
+	db, err := newStateDB(":memory:")
+	if err != nil {
+		t.Fatalf("newStateDB: %v", err)
+	}
+	defer db.Close()
+
+	outRoot := "resource/parsed"
+
+	// relDir = "2023": nested structure preserved.
+	out, suf, err := db.resolveOutputPath("/mnt/doc/Colyton-125Torquay/2023/Invoice INV-3556.pdf", outRoot, "aaaaaaaa1111111111111111111111111", "2023")
+	if err != nil {
+		t.Fatalf("resolveOutputPath (2023): %v", err)
+	}
+	want := filepath.Join(outRoot, "2023", "Invoice INV-3556.md")
+	if out != want {
+		t.Fatalf("resolveOutputPath (2023) = %q; want %q", out, want)
+	}
+	if suf != "" {
+		t.Fatalf("suffix = %q; want empty", suf)
+	}
+	t.Logf("nested (2023) -> %s", out)
+
+	// relDir = "2023/January": deeper nesting.
+	out, _, err = db.resolveOutputPath("/mnt/doc/Colyton-125Torquay/2023/January/Invoice INV-3556.pdf", outRoot, "aaaaaaaa1111111111111111111111111", "2023/January")
+	if err != nil {
+		t.Fatalf("resolveOutputPath (2023/January): %v", err)
+	}
+	want = filepath.Join(outRoot, "2023", "January", "Invoice INV-3556.md")
+	if out != want {
+		t.Fatalf("resolveOutputPath (2023/January) = %q; want %q", out, want)
+	}
+	t.Logf("nested (2023/January) -> %s", out)
+
+	// relDir = "" (single full file path, no sub-structure) -> outputRoot/base.md
+	out, _, err = db.resolveOutputPath("/mnt/full/path/2023/Invoice INV-3556.pdf", outRoot, "aaaaaaaa1111111111111111111111111", "")
+	if err != nil {
+		t.Fatalf("resolveOutputPath (\"): %v", err)
+	}
+	want = filepath.Join(outRoot, "Invoice INV-3556.md")
+	if out != want {
+		t.Fatalf("resolveOutputPath (\") = %q; want %q", out, want)
+	}
+	t.Logf("relDir empty -> %s", out)
+
+	// relDir = "." (single full file path, no sub-structure) -> outputRoot/base.md
+	out, _, err = db.resolveOutputPath("/mnt/full/path/2023/Invoice INV-3556.pdf", outRoot, "aaaaaaaa1111111111111111111111111", ".")
+	if err != nil {
+		t.Fatalf("resolveOutputPath (.): %v", err)
+	}
+	if out != want {
+		t.Fatalf("resolveOutputPath (.) = %q; want %q", out, want)
+	}
+
+	// Nested collision: same relDir, different hash, same base name ->
+	// base_<hash7>.md under the same sub-directory.
+	db.upsert(&stateRecord{SourcePath: "/mnt/doc/Colyton-125Torquay/2023/Invoice INV-3556.pdf", Hash: "aaaaaaaa1111111111111111111111111", OutputPath: want, SourceType: "pdf", PageCount: 1})
+	collHash := "bbbbbb2222222222222222222222222"
+	out, suf, err = db.resolveOutputPath("/mnt/doc/Colyton-125Torquay/2023/Invoice INV-3556.pdf", outRoot, collHash, "2023")
+	if err != nil {
+		t.Fatalf("resolveOutputPath (collision): %v", err)
+	}
+	wantColl := filepath.Join(outRoot, "2023", "Invoice INV-3556"+collHash[:7]+".md")
+	if out != wantColl {
+		t.Fatalf("resolveOutputPath (collision) = %q; want %q", out, wantColl)
+	}
+	if suf != collHash[:7] {
+		t.Fatalf("collision suffix = %q; want %q", suf, collHash[:7])
+	}
+	if filepath.Base(out) == filepath.Base(want) {
+		t.Fatalf("collision did not produce a distinct basename: %q == %q", filepath.Base(out), filepath.Base(want))
+	}
+	t.Logf("collision -> %s (suffix %q)", out, suf)
 }

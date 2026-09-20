@@ -201,17 +201,26 @@ func (db *StateDB) recordOutput(outputPath, hash string) {
 //
 // Collision keys are matched against recordOutput, which also keys by the
 // output basename, so both agree on run-over-run consistency.
-func (db *StateDB) resolveOutputPath(source, outputRoot, sourceHash string) (path, suffix string, err error) {
+func (db *StateDB) resolveOutputPath(source, outputRoot, sourceHash, relDir string) (path, suffix string, err error) {
 	base := strings.TrimSuffix(filepath.Base(source), filepath.Ext(source))
+
+	// Preserve the source's relative directory structure so nested inputs
+	// map to nested outputs: input root "x", file "2023/Invoice.pdf" ->
+	// outputRoot/2023/Invoice.md. relDir is "" or "." when the input is a
+	// single full file path (no sub-structure under the input root).
+	sub := outputRoot
+	if relDir != "" && relDir != "." {
+		sub = filepath.Join(outputRoot, relDir)
+	}
 	name := base + ".md"
-	plain := filepath.Join(outputRoot, name)
+	plain := filepath.Join(sub, name)
 
 	// If a DIFFERENT hash already produced this basename, collide with a
 	// hash suffix so the two never clobber each other.
 	if hashSet, ok := db.outputHashes[name]; ok {
 		if _, isSame := hashSet[sourceHash]; !isSame {
 			suffix = sourceHash[:7]
-			return filepath.Join(outputRoot, base+sourceHash[:7]+".md"), suffix, nil
+			return filepath.Join(sub, base+sourceHash[:7]+".md"), suffix, nil
 		}
 	}
 	return plain, "", nil
