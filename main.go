@@ -176,14 +176,15 @@ func run(cfg config) error {
 
 		// New content (or -force): resolve the output path, colliding
 		// same-named-but-different-content outputs via a hash suffix.
+		log.Printf("[DEBUG] inputType: root=%q relDir=%q baseName=%q outputDir=%q",
+			doc.sourcePath, doc.relDir, doc.baseName, cfg.outputDir)
 		outPath, _, oerr := stateDB.resolveOutputPath(doc.sourcePath, cfg.outputDir, h, doc.relDir)
 		if oerr != nil {
 			log.Printf("output for %s: %v", doc.sourcePath, oerr)
 			continue
 		}
-		if cfg.verbose {
-			log.Printf("[DEBUG] outPath=%s", outPath)
-		}
+
+		log.Printf("[DEBUG] outPath=%s", outPath)
 
 		if cfg.skipExisting {
 			if _, err := os.Stat(outPath); err == nil {

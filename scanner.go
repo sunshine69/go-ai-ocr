@@ -27,15 +27,39 @@ var imageExts = map[string]bool{
 	".gif":  true,
 }
 
-// discoverDocuments walks the input directory and returns one entry per
-// PDF or image file found, in the order filepath.Walk visits them
-// (alphabetical within each directory). Page expansion happens later,
+// discoverDocuments finds one entry per PDF or image file under the input.
+// The input root may itself be a directory (in which case relDir preserves
+// each file's sub-structure for nested outputs) or a single file (where the
+// output .md must land directly inside -o). Page expansion happens later,
 // per document, during rendering.
 func discoverDocuments(cfg config) ([]document, error) {
-	var docs []document
 	root := cfg.inputDir
 
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+
+	// Input is a single file (not a directory). The output .md must land
+	// directly inside the output root (e.g. -o resources/parsed1 writes
+	// resources/parsed1/<base>.md), so we treat the file as the input root
+	// and set relDir = ".".
+	if !info.IsDir() {
+		return singleDoc(root), nil
+	}
+
+	// Input is a directory: walk it and tag each file with the path of its
+	// parent directory relative to the input root so nested inputs map to
+	// nested outputs. relDir defaults to "." for a top-level file.
+	return discoverDir(root, root)
+}
+
+// discoverDir walks root (the input directory) collecting every PDF or
+// image, tagging each with the directory of its source relative to root.
+func discoverDir(root, walkPath string) ([]document, error) {
+	var docs []document
+
+	err := filepath.Walk(walkPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -49,18 +73,20 @@ func discoverDocuments(cfg config) ([]document, error) {
 		}
 		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 
-		switch {
-		case ext == ".pdf":
-			docs = append(docs, document{sourcePath: path, relDir: relDir, baseName: base, isPDF: true})
-		case imageExts[ext]:
-			docs = append(docs, document{sourcePath: path, relDir: relDir, baseName: base})
-		}
+		docs = append(docs, document{sourcePath: path, relDir: relDir, baseName: base, isPDF: ext == ".pdf"})
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return docs, nil
+}
+
+// singleDoc builds the single document entry for a single-file input,
+// with relDir = "." so resolveOutputPath writes into the output root.
+func singleDoc(path string) []document {
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	return []document{{sourcePath: path, relDir: ".", baseName: base, isPDF: strings.EqualFold(filepath.Ext(path), ".pdf")}}
 }
 
 func (d document) sourceType() string {
